@@ -1,0 +1,9 @@
+BWCE application {{ include "bwce-app.fullname" . }} deployed to namespace {{ .Release.Namespace }}.
+
+The first start unpacks the BWCE runtime, which can take a minute or two. Watch it:
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "bwce-app.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} logs -f deploy/{{ include "bwce-app.fullname" . }}
+
+Test it locally:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "bwce-app.fullname" . }} 8080:{{ index .Values.service.ports (index .Values.ports 0).name | default (index .Values.ports 0).containerPort }}
+  curl http://localhost:8080/

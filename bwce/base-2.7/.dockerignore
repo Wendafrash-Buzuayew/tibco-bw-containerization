@@ -1,0 +1,5 @@
+examples
+*.md
+Dockerfile
+.git
+createDockerImage.sh

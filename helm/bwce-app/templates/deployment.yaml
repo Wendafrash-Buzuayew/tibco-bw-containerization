@@ -1,0 +1,173 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "bwce-app.fullname" . }}
+  labels:
+    {{- include "bwce-app.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "bwce-app.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        # Roll pods when app config changes (env vars are read only at start).
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if and .Values.appSecret.data (not .Values.appSecret.existingSecret) }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "bwce-app.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "bwce-app.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountToken }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: bwce
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            {{- range .Values.ports }}
+            - name: {{ .name }}
+              containerPort: {{ .containerPort }}
+              protocol: {{ .protocol | default "TCP" }}
+            {{- end }}
+            - name: health
+              containerPort: {{ .Values.health.port }}
+              protocol: TCP
+          env:
+            # Where setup.sh unpacks the runtime; backed by the tmp emptyDir.
+            - name: BW_APP_DIR
+              value: /tmp
+            - name: BW_PROFILE
+              value: {{ include "bwce-app.profileFile" . | quote }}
+            - name: BW_LOGLEVEL
+              value: {{ .Values.bwce.logLevel | quote }}
+            - name: BW_JAVA_OPTS
+              value: {{ .Values.bwce.javaOpts | quote }}
+            {{- with .Values.bwce.engineThreadCount }}
+            - name: BW_ENGINE_THREADCOUNT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.bwce.engineStepCount }}
+            - name: BW_ENGINE_STEPCOUNT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.bwce.applicationJobFlowLimit }}
+            - name: BW_APPLICATION_JOB_FLOWLIMIT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.bwce.disableEarValidation }}
+            - name: DISABLE_BWCE_EAR_VALIDATION
+              value: "true"
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "bwce-app.fullname" . }}
+            {{- with (include "bwce-app.secretName" .) }}
+            - secretRef:
+                name: {{ . }}
+            {{- end }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.health.path }}
+              port: health
+            {{- toYaml .Values.startupProbe | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.health.path }}
+              port: health
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.health.path }}
+              port: health
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          {{- if gt (int .Values.preStopSleepSeconds) 0 }}
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "{{ .Values.preStopSleepSeconds }}"]
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.externalProfile.enabled }}
+            # setup.sh uses /<BW_PROFILE> in preference to the EAR's copy.
+            - name: profile
+              mountPath: /{{ include "bwce-app.profileFile" . }}
+              subPath: {{ include "bwce-app.profileFile" . }}
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            {{- with .Values.tmpVolume.medium }}
+            medium: {{ . }}
+            {{- end }}
+            sizeLimit: {{ .Values.tmpVolume.sizeLimit }}
+        {{- if .Values.externalProfile.enabled }}
+        - name: profile
+          {{- if .Values.externalProfile.secretName }}
+          secret:
+            secretName: {{ .Values.externalProfile.secretName }}
+          {{- else }}
+          configMap:
+            name: {{ required "externalProfile.secretName or externalProfile.configMapName is required when externalProfile.enabled" .Values.externalProfile.configMapName }}
+          {{- end }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- range . }}
+        - {{ toYaml . | nindent 10 | trim }}
+          labelSelector:
+            matchLabels:
+              {{- include "bwce-app.selectorLabels" $ | nindent 14 }}
+        {{- end }}
+      {{- end }}

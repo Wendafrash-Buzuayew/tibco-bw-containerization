@@ -1,0 +1,205 @@
+# Default values for bwce-app. One Helm release = one BWCE application.
+
+replicaCount: 2
+
+image:
+  # Application image built from bwce/apps/<app> (base image + EAR).
+  repository: registry.example.com/tibco/http-sample
+  # Defaults to .Chart.AppVersion when empty. Prefer immutable tags or digests.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+# - name: regcred
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  # BWCE apps don't call the Kubernetes API, so don't mount a token.
+  automountToken: false
+
+podAnnotations: {}
+podLabels: {}
+
+# ---------------------------------------------------------------------------
+# BWCE runtime settings (read by the base image's setup.sh)
+# ---------------------------------------------------------------------------
+bwce:
+  # Profile (.substvar) inside the EAR to use, e.g. "default", "prod".
+  profile: default
+  # ERROR | WARN | INFO | DEBUG
+  logLevel: ERROR
+  # JVM options. Keep -Xmx at roughly 75% of resources.limits.memory, leaving
+  # headroom for metaspace, threads and native memory.
+  javaOpts: "-Xms256m -Xmx768m"
+  # Extra BWCE engine tuning (optional, unset = BWCE default).
+  engineThreadCount: ""
+  engineStepCount: ""
+  applicationJobFlowLimit: ""
+  # setup.sh refuses EARs whose MANIFEST lacks the BWCE edition marker (bwcf),
+  # i.e. classic BW6 EARs. Convert those in Business Studio Container Edition;
+  # don't set this to force them through.
+  disableEarValidation: false
+
+# Application properties. Every key becomes an env var; BWCE resolves
+# #KEY# tokens in the app's .substvar from these (e.g. MESSAGE -> #MESSAGE#).
+# Non-sensitive values only; they're stored in a ConfigMap.
+appConfig:
+  MESSAGE: "Hello from BWCE on Kubernetes"
+
+# Sensitive app properties (passwords, tokens). Prefer existingSecret,
+# managed by your secret tooling (External Secrets, Sealed Secrets, Vault).
+appSecret:
+  existingSecret: ""
+  # Only used when existingSecret is empty. Don't commit real values.
+  data: {}
+  #  DB_PASSWORD: changeme
+
+# Mount a full .substvar profile instead of the one in the EAR (works with
+# BWCE 2.7-2.9 and 6.12+: setup.sh prefers a /*.substvar file at the root).
+# The Secret/ConfigMap must contain the key "<bwce.profile>.substvar".
+# Use a Secret whenever the profile contains passwords (BW6 profiles usually do):
+#   kubectl create secret generic my-app-profile --from-file=UAT.substvar
+externalProfile:
+  enabled: false
+  secretName: ""      # preferred
+  configMapName: ""   # only for profiles without secrets
+
+# Extra volumes/mounts, e.g. keystores the app expects at fixed paths
+# (BW6 apps often reference /data/conf/tibco/cert/...). Create the Secret with:
+#   kubectl create secret generic tibco-certs \
+#     --from-file=certs.jks --from-file=server.p12
+extraVolumes: []
+# - name: client-certs
+#   secret:
+#     secretName: tibco-certs
+#     items: [{ key: certs.jks, path: certs.jks }]
+extraVolumeMounts: []
+# - name: client-certs
+#   mountPath: /data/conf/tibco/cert/client
+#   readOnly: true
+
+# Extra raw env entries (supports valueFrom).
+extraEnv: []
+# - name: POD_IP
+#   valueFrom: { fieldRef: { fieldPath: status.podIP } }
+
+# ---------------------------------------------------------------------------
+# Networking
+# ---------------------------------------------------------------------------
+# Container ports the app listens on. The first is the main service port.
+ports:
+  - name: http
+    containerPort: 8080
+    protocol: TCP
+
+service:
+  type: ClusterIP
+  # Service port for each entry in .ports, matched by name.
+  ports:
+    http: 80
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: http-sample.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+          # Name of the entry in .ports to route to.
+          portName: http
+  tls: []
+  #  - secretName: http-sample-tls
+  #    hosts: [http-sample.example.com]
+
+# ---------------------------------------------------------------------------
+# Health checks. BWCE serves an engine health endpoint on port 7777.
+# Verify the path against your BWCE version's docs ("Application Health
+# Check"); override here if it differs.
+# ---------------------------------------------------------------------------
+health:
+  port: 7777
+  path: /_ping/
+
+# setup.sh unzips the runtime and EAR on every pod start, so the first start
+# can take a minute or more. The startup probe allows up to 5 minutes here.
+startupProbe:
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 30
+livenessProbe:
+  periodSeconds: 20
+  timeoutSeconds: 5
+  failureThreshold: 3
+readinessProbe:
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+# ---------------------------------------------------------------------------
+# Resources and scaling
+# ---------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    # No CPU limit by default: CPU throttling slows JVM startup and GC a lot.
+    memory: 1Gi
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Time BWCE gets to finish in-flight jobs after SIGTERM.
+terminationGracePeriodSeconds: 60
+# Delay before SIGTERM so the endpoint is removed from Services/Ingress first.
+preStopSleepSeconds: 10
+
+# ---------------------------------------------------------------------------
+# Security. The base image runs as user bwce (uid/gid 2001).
+# ---------------------------------------------------------------------------
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 2001
+  runAsGroup: 2001
+  fsGroup: 2001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+  # setup.sh writes the unpacked runtime to /tmp (an emptyDir below) and also
+  # tries to touch /resources. Kept false until verified with your runtime.
+  readOnlyRootFilesystem: false
+
+# Scratch space for the unpacked BWCE runtime + app (BW_APP_DIR=/tmp).
+tmpVolume:
+  sizeLimit: 2Gi
+  # Set to "Memory" for tmpfs (counts against the memory limit).
+  medium: ""
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Spread replicas across nodes by default.
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway

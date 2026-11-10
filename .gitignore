@@ -1,0 +1,19 @@
+# TIBCO runtime and plugin archives (licensed, large)
+**/*.zip
+
+# Application archives: they contain environment config and often passwords
+**/*.ear
+
+# Keystores, certificates, keys
+**/*.jks
+**/*.p12
+**/*.pfx
+**/*.pem
+**/*.key
+**/*.crt
+**/*.cer
+
+# Generated profiles, EMS jars, anything local
+**/*.substvar
+bwce/local/
+*.tgz

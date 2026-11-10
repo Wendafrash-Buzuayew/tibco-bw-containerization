@@ -1,0 +1,11 @@
+apiVersion: v2
+name: bwce-app
+description: Generic chart for one TIBCO BusinessWorks Container Edition (BWCE) application per release
+type: application
+version: 0.1.0
+# Version of the application image by default; override with image.tag.
+appVersion: "1.0.0"
+keywords:
+  - tibco
+  - bwce
+  - businessworks
