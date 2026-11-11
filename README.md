@@ -20,6 +20,7 @@ met on the way, so you don't have to rediscover them.
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Symptom → cause → fix for real errors (build, startup, runtime, Kubernetes) |
 | [`docs/case-study.md`](docs/case-study.md) | How a real BW6 migration went, in order, with the lessons learned |
 | [`docs/concepts.md`](docs/concepts.md) | BW6 vs BWCE in five minutes: EAR, profile, AppNode, edition check, OSGi |
+| [`docs/ci.md`](docs/ci.md) | GitLab CI/CD: validate, build & push, deploy with rollback, smoke test; EARs kept in the package registry |
 | `bwce/base/` | Base image for **BWCE 6.12+** (TIBCO's official scripts, unmodified) |
 | `bwce/base-2.7/` | Base image for **BWCE 2.7.0 - 2.9.x** (TIBCO's official scripts, unmodified) |
 | `bwce/build.sh` | Builds the base image (picks the right scripts from the runtime zip name) and app images |

@@ -1,0 +1,146 @@
+# CI/CD for BWCE apps: validate -> build & push to Harbor -> deploy to UAT + smoke test.
+# Setup (runners, variables, EAR upload): docs/ci.md
+#
+# Runners (shell executor, no Docker-in-Docker needed):
+#   bwce-build   Linux Docker host that trusts the Harbor CA (e.g. the UAT Docker host)
+#   bwce-deploy  host with kubectl + helm access to the cluster (e.g. the jump host)
+#
+# EARs, the BWCE runtime zip and the EMS client jars are NOT in Git: they live
+# in this project's Generic Package Registry (bwce/ci/artifacts.sh).
+
+stages: [validate, base, build, deploy-uat]
+
+variables:
+  REGISTRY: registry.example.com
+  REGISTRY_PROJECT: registry.example.com/tibco
+  BWCE_VERSION: "2.9.1"
+  EMS_CLIENT_VERSION: "10.1"
+  UAT_NAMESPACE: my-namespace
+  # Set when running the pipeline manually to build/deploy one app only.
+  APP:
+    value: ""
+    description: "Only this app (folder under bwce/apps), empty = all"
+  GIT_DEPTH: "20"
+
+# One job per app. Add new apps to this list (folder name under bwce/apps/).
+.per_app:
+  parallel:
+    matrix:
+      - APP_DIR: [my-app]   # e.g. [orders-api, billing-api]
+  before_script:
+    - set -a; . "bwce/apps/$APP_DIR/app.env"; set +a
+    - export IMAGE="$REGISTRY_PROJECT/$IMAGE_NAME:$APP_VERSION"
+    - |
+      BASE_IMAGE="$REGISTRY_PROJECT/bwce-base:$BWCE_VERSION"
+      if [ "$BASE_FLAVOR" = ems ]; then BASE_IMAGE="$BASE_IMAGE-ems"; fi
+      export BASE_IMAGE
+
+# ---------------------------------------------------------------- validate
+guard-secrets:
+  stage: validate
+  tags: [bwce-build]
+  script:
+    # EARs (except TIBCO's public sample), keystores, profiles and zips never go in Git.
+    - |
+      bad=$(git ls-files | grep -Ei '\.(ear|jks|p12|pfx|pem|key|crt|cer|substvar|zip)$' \
+            | grep -vx 'bwce/apps/http-sample/docker.http.application_1.0.0.ear' \
+            | grep -v '^samples/tibbw5/' || true)
+      if [ -n "$bad" ]; then echo "Sensitive files tracked in Git:"; echo "$bad"; exit 1; fi
+      echo "No sensitive files tracked."
+
+lint-scripts:
+  stage: validate
+  tags: [bwce-build]
+  script:
+    - for f in bwce/*.sh bwce/ci/*.sh; do bash -n "$f"; done
+    - |
+      if command -v shellcheck >/dev/null; then shellcheck -S warning bwce/*.sh bwce/ci/*.sh
+      else echo "shellcheck not installed on the runner: syntax check only"; fi
+
+lint-chart:
+  stage: validate
+  tags: [bwce-deploy]
+  script:
+    - helm lint helm/bwce-app
+    - |
+      for f in bwce/apps/*/values-uat.yaml; do
+        echo "== $f"; helm template t helm/bwce-app -f "$f" >/dev/null
+      done
+
+# ---------------------------------------------------------------- base images (manual, rare)
+base-image:
+  stage: base
+  tags: [bwce-build]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api"'
+      when: manual
+  allow_failure: true
+  script:
+    - echo "$HARBOR_PASSWORD" | docker login "$REGISTRY" -u "$HARBOR_USER" --password-stdin
+    - work="$CI_PROJECT_DIR/.ci-build/base"; rm -rf "$work"; mkdir -p "$work"
+    - bwce/ci/artifacts.sh fetch bwce-runtime "$BWCE_VERSION" "bwce-runtime-$BWCE_VERSION.zip" "$work"
+    - for j in tibjms.jar tibjmsadmin.jar tibjmsufo.jar; do bwce/ci/artifacts.sh fetch ems-client "$EMS_CLIENT_VERSION" "$j" "$work/ems-lib"; done
+    - bwce/build.sh base "$work/bwce-runtime-$BWCE_VERSION.zip" "$REGISTRY_PROJECT/bwce-base:$BWCE_VERSION"
+    - docker push "$REGISTRY_PROJECT/bwce-base:$BWCE_VERSION"
+    - bwce/add-ems-client.sh "$REGISTRY_PROJECT/bwce-base:$BWCE_VERSION" "$work/ems-lib" "$REGISTRY_PROJECT/bwce-base:$BWCE_VERSION-ems"
+    - docker push "$REGISTRY_PROJECT/bwce-base:$BWCE_VERSION-ems"
+  after_script:
+    - rm -rf "$CI_PROJECT_DIR/.ci-build"
+
+# ---------------------------------------------------------------- build
+build-image:
+  extends: .per_app
+  stage: build
+  tags: [bwce-build]
+  rules:
+    - if: '$APP != "" && $APP != $APP_DIR'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api"'
+  script:
+    - echo "$HARBOR_PASSWORD" | docker login "$REGISTRY" -u "$HARBOR_USER" --password-stdin
+    # Tags are immutable: a released version is never rebuilt or overwritten.
+    - |
+      if docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
+        echo "$IMAGE already in Harbor: nothing to build (bump APP_VERSION in app.env for a new EAR)."
+        exit 0
+      fi
+    - work="$CI_PROJECT_DIR/.ci-build/$APP_DIR"; rm -rf "$work"; mkdir -p "$work"
+    - cp "bwce/apps/$APP_DIR/Dockerfile" "$work/"
+    - bwce/ci/artifacts.sh fetch "$IMAGE_NAME" "$APP_VERSION" "$EAR_FILE" "$work"
+    - bwce/ci/check-ear.sh "$work/$EAR_FILE" "$PROFILE" "$BASE_FLAVOR"
+    - docker pull "$BASE_IMAGE"
+    - bwce/build.sh app "$work" "$BASE_IMAGE" "$IMAGE"
+    - |
+      if command -v trivy >/dev/null; then
+        trivy image --severity HIGH,CRITICAL --exit-code 0 --no-progress "$IMAGE"
+      else echo "trivy not installed on the runner: image scan skipped"; fi
+    - docker push "$IMAGE"
+  after_script:
+    - rm -rf "$CI_PROJECT_DIR/.ci-build"
+
+# ---------------------------------------------------------------- deploy
+deploy-uat:
+  extends: .per_app
+  stage: deploy-uat
+  tags: [bwce-deploy]
+  environment:
+    name: uat/$APP_DIR
+  resource_group: uat-$APP_DIR
+  rules:
+    - if: '$APP != "" && $APP != $APP_DIR'
+      when: never
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api"'
+      when: manual
+  allow_failure: true
+  script:
+    # Profile Secret = EAR profile + JDBC fix + bwce/apps/<app>/profile-overrides-uat.txt
+    - bwce/ci/profile-secret.sh "$APP_DIR" "$UAT_NAMESPACE"
+    - |
+      case "$(helm version --short)" in v3.*) rb=--atomic ;; *) rb=--rollback-on-failure ;; esac
+      helm upgrade --install "$RELEASE" helm/bwce-app -n "$UAT_NAMESPACE" \
+        -f "bwce/apps/$APP_DIR/values-uat.yaml" --set image.tag="$APP_VERSION" \
+        --wait --timeout 10m "$rb"
+    # In the same job so it always checks the release this job just deployed.
+    - bwce/ci/smoke-test.sh "$RELEASE" "$UAT_NAMESPACE"
+  after_script:
+    - rm -rf "$CI_PROJECT_DIR/.ci-build"

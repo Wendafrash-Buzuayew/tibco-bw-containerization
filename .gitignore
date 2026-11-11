@@ -17,3 +17,4 @@
 **/*.substvar
 bwce/local/
 *.tgz
+.ci-build/

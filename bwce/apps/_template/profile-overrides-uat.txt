@@ -1,0 +1,5 @@
+# UAT profile overrides applied by fix-profile.sh (CI: bwce/ci/profile-secret.sh).
+# One "/Property/Name=value" per line. Hosts, ports and paths only, never
+# passwords. Use the full name (//Module.module///Prop) when a property exists
+# in several modules. Delete this file if no overrides are needed.
+#/Some/Host=reachable.example.com
